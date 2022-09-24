@@ -58,9 +58,13 @@ terraform -chdir=terraform init
 ```
 cp terraform/example.tfvars terraform/terraform.tfvars
 ```
-
 Then modify the file as you see fit.
 
+For EC2 key pair, generate OpenSSH key and configure in Terraform for importing into AWS instead of using AWS console to create EC2 key pair.
+
+~~For EC2 keypair, choose PEM format and then generate the OpenSSH key format for the public key as follow.~~
+~~ssh-keygen -y -f eks_jh.pem > eks_jh.pub~~
+~~For PPK file, puttygen eks-jh2.ppk -O public-openssh -o eks-jh2.pub~~
 
 ### Create the DB Credentials Secret in AWS
 
@@ -85,6 +89,7 @@ chmod 0600 $db_creds_secret_file
 
 aws secretsmanager create-secret \
   --profile "$aws_profile" \
+  --region ${aws_region}
   --name "$db_creds_secret_name" \
   --description "DB credentials for ${cluster_name}" \
   --secret-string file://$db_creds_secret_file
@@ -142,9 +147,12 @@ you connect to the bastion securely. For a guide on how to (and why)
 use the script, see [this video](https://youtu.be/TcmOd4whPeQ).
 
 ```
-ssh4realz $(terraform -chdir=terraform output -raw bastion_instance_id)
+./ssh4realz $aws_profile $(terraform -chdir=terraform output -raw bastion_instance_id)
 ```
 
+TODO: How to use existing EC2 key pair and setting up the OpenSSH authorized_keys properly?
+
+Use AWS console and EC2 Instance Connect for now...
 
 ### Subsequent Bastion SSH Connections
 
@@ -161,7 +169,7 @@ ssh -A ubuntu@$(terraform -chdir=terraform output -raw bastion_public_ip)
 Back in your local machine
 
 ```
-aws eks --region=$(terraform -chdir=terraform output -raw aws_region) \
+aws eks --profile ${aws_profile} --region=$(terraform -chdir=terraform output -raw aws_region) \
   update-kubeconfig \
   --dry-run \
   --name $(terraform -chdir=terraform output -raw k8s_cluster_name) \
@@ -213,10 +221,10 @@ To exit:
 ### Log in to the UI and API Container Registries
 
 ```
-aws ecr get-login-password --region $(terraform -chdir=terraform output -raw aws_region) | \
+aws --profile $aws_profile ecr get-login-password --region $(terraform -chdir=terraform output -raw aws_region) | \
   docker login --username AWS --password-stdin $(terraform -chdir=terraform output -raw registry_frontend)
 
-aws ecr get-login-password --region $(terraform -chdir=terraform output -raw aws_region) | \
+aws --profile $aws_profile ecr get-login-password --region $(terraform -chdir=terraform output -raw aws_region) | \
   docker login --username AWS --password-stdin $(terraform -chdir=terraform output -raw registry_api)
 ```
 
@@ -229,7 +237,7 @@ This section will be based off of [this guide](https://docs.aws.amazon.com/eks/l
 First check if the cluster already has an OIDC provider:
 
 ```
-aws eks describe-cluster \
+aws --profile $aws_profile eks describe-cluster \
     --region $(terraform -chdir=terraform output -raw aws_region) \
     --name $(terraform -chdir=terraform output -raw k8s_cluster_name) \
     --query "cluster.identity.oidc.issuer" \
@@ -245,14 +253,14 @@ https://oidc.eks.us-west-2.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E
 Now grep that sample ID from your list of OIDC providers:
 
 ```
-aws iam list-open-id-connect-providers | grep <EXAMPLED539D4633E53DE1B716D3041E>
+aws --profile $aws_profile iam list-open-id-connect-providers | grep <EXAMPLED539D4633E53DE1B716D3041E>
 ```
 
 If the above command returned an ARN, you're done with this section. If
 it did not return one, then run:
 
 ```
-eksctl utils associate-iam-oidc-provider \
+eksctl --profile ${aws_profile} utils associate-iam-oidc-provider \
     --region $(terraform -chdir=terraform output -raw aws_region) \
     --cluster $(terraform -chdir=terraform output -raw k8s_cluster_name) \
     --approve
@@ -275,6 +283,14 @@ kubectl apply --validate=false -f apps/cert-manager/cert-manager.yaml
 
 Watch for the status of each cert-manager pod via:
 
+ISSUE: cert-manager-cainjector hit error and status changed to CrashLoopBackoff
+
+Install the latest version here directly from jetstack:
+
+```
+kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.9.1/cert-manager.yaml
+```
+
 ```
 watch -d kubectl get pods -n cert-manager
 ```
@@ -288,7 +304,7 @@ API services to the world. We will base the following steps on
 [this guide](https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.2/deploy/installation/)
 
 ```
-aws iam create-policy \
+aws --profile $aws_profile iam create-policy \
     --policy-name AWSLoadBalancerControllerIAMPolicy \
     --policy-document file://apps/aws-lb-controller/iam-policy.json | \
   tee tmp/aws-load-balancer-controller-iam-policy.json
@@ -296,7 +312,7 @@ aws iam create-policy \
 aws_account_id=$(terraform -chdir=terraform output -raw aws_account_id)
 k8s_cluster_name=$(terraform -chdir=terraform output -raw k8s_cluster_name)
 
-eksctl create iamserviceaccount \
+eksctl --profile $aws_profile create iamserviceaccount \
 --cluster="$k8s_cluster_name" \
 --namespace=kube-system \
 --name=aws-load-balancer-controller \
@@ -308,6 +324,16 @@ cat apps/aws-lb-controller/load-balancer.yaml | \
   sed 's@--cluster-name=K8S_CLUSTER_NAME@'"--cluster-name=${k8s_cluster_name}"'@' | \
   kubectl apply -f -
 ```
+
+FAILED: 
+MountVolume.SetUp failed for volume "cert" : secret "aws-load-balancer-webhook-tls" not found
+
+Follow the guide for EKS 1.22
+https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.4/deploy/installation/
+
+curl -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.4.3/docs/install/iam_policy.json
+
+REPLACE THE OLD load-balancer.yaml with the latest one for v2.4.3 and update the placeholder for K8S_CLUSTER_NAME
 
 Watch the aws-load-balancer-controller-xxxxxx-yyyy pod go up via:
 
@@ -416,9 +442,12 @@ Once this script completes, the AWS LB Controller will be able to
 create the ALB. Next, we update the API DNS record to point to the ALB:
 
 ```
-scripts/route53-recordset create api
+scripts/route53-recordset CREATE api
 ```
 
+Also need to edit the health checks for API Target groups as the response status code is 404 or use the correct health check target at /healthz/
+
+Swagger endpoint: https://api.${FQDN}/docs#/
 
 ### Build and Deploy the Frontend
 
@@ -460,7 +489,7 @@ Once this script completes, the AWS LB Controller will be able to
 create the ALB. Next, we update the API DNS record to point to the ALB:
 
 ```
-scripts/route53-recordset create ui
+scripts/route53-recordset CREATE ui
 ```
 
 

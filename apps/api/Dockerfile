@@ -9,7 +9,12 @@ FROM python:3.7-slim
 WORKDIR /opt/api
 COPY ./quipper/ ./quipper/
 COPY ./setup.py .
-RUN pip install .
+
+RUN apt-get update \
+    && apt-get -y install libpq-dev gcc \
+    && pip install psycopg2
+
+RUN python3 -m pip install .
 
 EXPOSE 80
 

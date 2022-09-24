@@ -20,10 +20,10 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 
-resource "aws_key_pair" "authorized_key" {
-  key_name   = var.ec2_key_name
-  public_key = var.ec2_key
-}
+#resource "aws_key_pair" "authorized_key" {
+#  key_name   = var.ec2_key_name
+#  public_key = var.ec2_key
+#}
 
 data "aws_ami" "ubuntu" {
   most_recent = true
